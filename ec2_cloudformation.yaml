@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWSControl MCP Server - EC2 Instance for Claude Mobile Access
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 キーペア名（SSH アクセス用）
+  ApiKey:
+    Type: String
+    NoEcho: true
+    Description: MCP アクセス用 API キー（32文字以上推奨）
+    MinLength: 16
+
+Resources:
+  # IAM ロール（EC2 が AWS を操作する権限）
+  AWSControlMCPRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSControlMCPRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess
+        - arn:aws:iam::aws:policy/AmazonECS_FullAccess
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+        - arn:aws:iam::aws:policy/AmazonSchedulerFullAccess
+      Policies:
+        - PolicyName: AWSControlMCPExtra
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:AttachRolePolicy
+                  - iam:GetRole
+                  - iam:PassRole
+                  - sts:GetCallerIdentity
+                  - ec2:DescribeRegions
+                  - pricing:GetProducts
+                Resource: "*"
+
+  AWSControlInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref AWSControlMCPRole]
+
+  # セキュリティグループ
+  AWSControlSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: AWSControl MCP Server Security Group
+      Tags:
+        - Key: Name
+          Value: AWSControl-mcp-sg
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # Elastic IP（固定 IP アドレス）
+  AWSControlEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: AWSControl-mcp-eip
+
+  # EC2 インスタンス
+  AWSControlInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref AWSControlInstanceProfile
+      SecurityGroupIds: [!Ref AWSControlSecurityGroup]
+      Tags:
+        - Key: Name
+          Value: AWSControl-mcp
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          dnf install -y python3.11 python3.11-pip nginx git
+          python3.11 -m pip install "mcp[cli]" boto3 pyyaml
+          mkdir -p /opt/mcp
+
+          # systemd サービス
+          cat > /etc/systemd/system/mcp-aws.service << 'SVCEOF'
+          [Unit]
+          Description=AWSControl MCP Server (SSE)
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/opt/mcp
+          Environment=MCP_TRANSPORT=sse
+          Environment=MCP_HOST=127.0.0.1
+          Environment=MCP_PORT=8080
+          ExecStart=/usr/bin/python3.11 /opt/mcp/aws_infra_mcp_server.py
+          Restart=on-failure
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          SVCEOF
+
+          # nginx 設定（API キー認証）
+          cat > /etc/nginx/conf.d/mcp.conf << NGINXEOF
+          server {
+              listen 80;
+              server_name _;
+              location /mcp {
+                  if (\$http_x_api_key != "${ApiKey}") {
+                      return 401 '{"error":"Unauthorized"}';
+                  }
+                  proxy_pass http://127.0.0.1:8080;
+                  proxy_http_version 1.1;
+                  proxy_set_header Connection "";
+                  proxy_buffering off;
+                  proxy_cache off;
+                  proxy_read_timeout 3600s;
+              }
+          }
+          NGINXEOF
+
+          nginx -t && systemctl enable nginx && systemctl start nginx
+          systemctl daemon-reload && systemctl enable mcp-aws
+          # MCP サーバーファイルは GitHub Actions で配置されるため起動は後で行う
+
+  AWSControlEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref AWSControlInstance
+      EIP: !Ref AWSControlEIP
+
+Outputs:
+  PublicIP:
+    Value: !Ref AWSControlEIP
+    Description: EC2 の固定 IP アドレス
+  MCPUrl:
+    Value: !Sub "http://${AWSControlEIP}/mcp"
+    Description: Claude.ai に登録する MCP URL
+  SSHCommand:
+    Value: !Sub "ssh -i your-key.pem ec2-user@${AWSControlEIP}"
+    Description: SSH 接続コマンド
+  StackName:
+    Value: AWSControl-mcp
+    Description: CloudFormation スタック名

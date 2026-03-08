@@ -1,0 +1,41 @@
+name: Deploy MCP Server to EC2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'aws_infra_mcp_server.py'
+      - 'ec2_cloudformation.yaml'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy MCP server to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "aws_infra_mcp_server.py"
+          target: "/opt/mcp/"
+
+      - name: Restart MCP service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo systemctl restart mcp-aws
+            sleep 3
+            sudo systemctl status mcp-aws --no-pager
+            echo "=== Deploy completed at $(date) ==="
