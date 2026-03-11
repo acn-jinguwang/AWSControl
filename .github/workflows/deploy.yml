@@ -8,7 +8,7 @@ on:
       - 'aws_infra_mcp_server.py'
       - 'ec2_cloudformation.yaml'
       - '.github/workflows/deploy.yml'
-  workflow_dispatch:  # 手動実行も可能
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -22,23 +22,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
       - name: Copy MCP server to EC2
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "aws_infra_mcp_server.py"
-          target: "/opt/mcp/"
+        run: |
+          scp -i ~/.ssh/deploy_key \
+            aws_infra_mcp_server.py \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/opt/mcp/aws_infra_mcp_server.py"
 
       - name: Restart MCP service
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            sudo systemctl restart mcp-aws
-            sleep 3
-            sudo systemctl status mcp-aws --no-pager
-            echo "=== Deploy completed at $(date) ==="
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "sudo systemctl restart mcp-aws && sleep 3 && sudo systemctl status mcp-aws --no-pager && echo '=== Deploy completed at $(date) ==='"
