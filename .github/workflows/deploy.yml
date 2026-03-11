@@ -10,6 +10,9 @@ on:
       - '.github/workflows/deploy.yml'
   workflow_dispatch:  # 手動実行も可能
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   deploy:
     name: Deploy to EC2
@@ -29,7 +32,7 @@ jobs:
           target: "/opt/mcp/"
 
       - name: Restart MCP service
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
