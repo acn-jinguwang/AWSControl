@@ -2792,33 +2792,37 @@ def stop_testspp(region: str = DEFAULT_REGION) -> dict:
 
 def _find_hotel_resources(region: str) -> dict:
     """
-    Name タグが 'Terrace Villa Foresta Asama' の RDS・ECS リソースを検索して返す。
+    Terrace Villa Foresta Asama の RDS・ECS リソースを検索して返す。
+    ECS: クラスター名に 'foresta-asama' を含む、または Name タグが一致するサービス
+    RDS: Name タグが一致する、または識別子に 'foresta-asama' を含む DB インスタンス
     """
     import boto3
     TAG_NAME = "Terrace Villa Foresta Asama"
+    CLUSTER_KEYWORD = "foresta-asama"
     result = {"rds": [], "ecs": []}
 
-    # RDS: Name タグが一致する DB インスタンス
+    # RDS: Name タグ一致 または 識別子に foresta-asama を含む
     rds = boto3.client("rds", region_name=region)
     for db in rds.describe_db_instances()["DBInstances"]:
         tags = {t["Key"]: t["Value"] for t in db.get("TagList", [])}
-        if tags.get("Name") == TAG_NAME:
+        if tags.get("Name") == TAG_NAME or CLUSTER_KEYWORD in db["DBInstanceIdentifier"].lower():
             result["rds"].append({
                 "db_identifier": db["DBInstanceIdentifier"],
                 "status": db["DBInstanceStatus"],
             })
 
-    # ECS: Name タグが一致するサービス（全クラスター検索）
+    # ECS: クラスター名に foresta-asama を含む、または Name タグが一致するサービス
     ecs = boto3.client("ecs", region_name=region)
     for cluster_arn in ecs.list_clusters().get("clusterArns", []):
+        cluster_name = cluster_arn.split("/")[-1]
         svc_arns = ecs.list_services(cluster=cluster_arn).get("serviceArns", [])
         if not svc_arns:
             continue
         for svc in ecs.describe_services(cluster=cluster_arn, services=svc_arns, include=["TAGS"])["services"]:
             tags = {t["key"]: t["value"] for t in svc.get("tags", [])}
-            if tags.get("Name") == TAG_NAME:
+            if CLUSTER_KEYWORD in cluster_name.lower() or tags.get("Name") == TAG_NAME:
                 result["ecs"].append({
-                    "cluster": cluster_arn.split("/")[-1],
+                    "cluster": cluster_name,
                     "cluster_arn": cluster_arn,
                     "service_name": svc["serviceName"],
                     "desired_count": svc["desiredCount"],
