@@ -72,9 +72,112 @@ from mcp.server.fastmcp import FastMCP
 # boto3, yaml は遅延インポート（各関数内で import）→ 起動時間短縮
 
 # ─────────────────────────────────────────
+# OAuth プロバイダー（EC2 リモートアクセス用）
+# MCP_OAUTH_ISSUER 環境変数が設定されている場合のみ有効
+# ─────────────────────────────────────────
+_OAUTH_ISSUER = os.environ.get("MCP_OAUTH_ISSUER")
+
+if _OAUTH_ISSUER:
+    import secrets as _secrets
+    import time as _time
+    from mcp.server.auth.provider import (
+        OAuthAuthorizationServerProvider,
+        AuthorizationCode,
+        AuthorizationParams,
+        AccessToken,
+        RefreshToken,
+        construct_redirect_uri,
+    )
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+    class _AutoApproveOAuthProvider(OAuthAuthorizationServerProvider):
+        """インメモリ OAuth プロバイダー（Claude.ai からの接続を自動承認）"""
+
+        def __init__(self):
+            self._clients: dict = {}
+            self._auth_codes: dict = {}
+            self._access_tokens: dict = {}
+
+        async def get_client(self, client_id: str):
+            return self._clients.get(client_id)
+
+        async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+            self._clients[client_info.client_id] = client_info
+
+        async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
+            # Claude.ai からの接続のみ自動承認（redirect_uri で判定）
+            if not str(params.redirect_uri).startswith("https://claude.ai/"):
+                from mcp.server.auth.provider import AuthorizeError
+                raise AuthorizeError(error="access_denied", error_description="Only claude.ai connections are allowed")
+            code = _secrets.token_urlsafe(32)
+            self._auth_codes[code] = AuthorizationCode(
+                code=code,
+                client_id=client.client_id,
+                redirect_uri=str(params.redirect_uri),
+                redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+                code_challenge=params.code_challenge,
+                expires_at=_time.time() + 300,
+                scopes=params.scopes,
+                resource=params.resource,
+            )
+            return construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state)
+
+        async def load_authorization_code(self, client, authorization_code: str):
+            return self._auth_codes.get(authorization_code)
+
+        async def exchange_authorization_code(self, client, auth_code: AuthorizationCode) -> OAuthToken:
+            self._auth_codes.pop(auth_code.code, None)
+            token = _secrets.token_urlsafe(32)
+            self._access_tokens[token] = AccessToken(
+                token=token,
+                client_id=client.client_id,
+                scopes=auth_code.scopes,
+                expires_at=None,
+            )
+            return OAuthToken(
+                access_token=token,
+                token_type="Bearer",
+                scope=" ".join(auth_code.scopes),
+            )
+
+        async def load_refresh_token(self, client, refresh_token: str):
+            return None
+
+        async def exchange_refresh_token(self, client, refresh_token, scopes) -> OAuthToken:
+            raise NotImplementedError("Refresh tokens not supported")
+
+        async def load_access_token(self, token: str):
+            return self._access_tokens.get(token)
+
+        async def revoke_token(self, token, token_type_hint=None) -> None:
+            if isinstance(token, AccessToken):
+                self._access_tokens.pop(token.token, None)
+
+    _oauth_provider = _AutoApproveOAuthProvider()
+    _auth_settings = AuthSettings(
+        issuer_url=_OAUTH_ISSUER,
+        resource_server_url=_OAUTH_ISSUER,
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=["claudeai"],
+            default_scopes=["claudeai"],
+        ),
+    )
+
+# ─────────────────────────────────────────
 # サーバー初期化
 # ─────────────────────────────────────────
-mcp = FastMCP("aws-infra-tools")
+if _OAUTH_ISSUER:
+    from mcp.server.transport_security import TransportSecuritySettings
+    mcp = FastMCP(
+        "aws-infra-tools",
+        auth_server_provider=_oauth_provider,
+        auth=_auth_settings,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
+else:
+    mcp = FastMCP("aws-infra-tools")
 
 DEFAULT_REGION = "ap-northeast-1"
 
@@ -2684,13 +2787,162 @@ def stop_testspp(region: str = DEFAULT_REGION) -> dict:
 
 
 # ─────────────────────────────────────────
+# Hotel（Terrace Villa Foresta Asama）起動・停止
+# ─────────────────────────────────────────
+
+def _find_hotel_resources(region: str) -> dict:
+    """
+    Name タグが 'Terrace Villa Foresta Asama' の RDS・ECS リソースを検索して返す。
+    """
+    import boto3
+    TAG_NAME = "Terrace Villa Foresta Asama"
+    result = {"rds": [], "ecs": []}
+
+    # RDS: Name タグが一致する DB インスタンス
+    rds = boto3.client("rds", region_name=region)
+    for db in rds.describe_db_instances()["DBInstances"]:
+        tags = {t["Key"]: t["Value"] for t in db.get("TagList", [])}
+        if tags.get("Name") == TAG_NAME:
+            result["rds"].append({
+                "db_identifier": db["DBInstanceIdentifier"],
+                "status": db["DBInstanceStatus"],
+            })
+
+    # ECS: Name タグが一致するサービス（全クラスター検索）
+    ecs = boto3.client("ecs", region_name=region)
+    for cluster_arn in ecs.list_clusters().get("clusterArns", []):
+        svc_arns = ecs.list_services(cluster=cluster_arn).get("serviceArns", [])
+        if not svc_arns:
+            continue
+        for svc in ecs.describe_services(cluster=cluster_arn, services=svc_arns, include=["TAGS"])["services"]:
+            tags = {t["key"]: t["value"] for t in svc.get("tags", [])}
+            if tags.get("Name") == TAG_NAME:
+                result["ecs"].append({
+                    "cluster": cluster_arn.split("/")[-1],
+                    "cluster_arn": cluster_arn,
+                    "service_name": svc["serviceName"],
+                    "desired_count": svc["desiredCount"],
+                    "running_count": svc["runningCount"],
+                })
+
+    return result
+
+
+@mcp.tool()
+def start_hotel(region: str = DEFAULT_REGION) -> dict:
+    """
+    「Start Hotel」と入力すると呼び出されます。
+    Name タグが 'Terrace Villa Foresta Asama' の RDS・ECS リソースをすべて起動します。
+    - RDS: stopped 状態の DB を起動
+    - ECS: desired_count が 0 のサービスを 1 に変更
+
+    Args:
+        region: AWSリージョン（デフォルト: ap-northeast-1）
+
+    Returns:
+        起動したリソースの一覧を含む dict
+    """
+    import boto3
+    rds = boto3.client("rds", region_name=region)
+    ecs = boto3.client("ecs", region_name=region)
+
+    resources = _find_hotel_resources(region)
+    started = {"rds": [], "ecs": [], "skipped": []}
+
+    # RDS 起動
+    for r in resources["rds"]:
+        if r["status"] == "stopped":
+            try:
+                resp = rds.start_db_instance(DBInstanceIdentifier=r["db_identifier"])
+                started["rds"].append({"db_identifier": r["db_identifier"], "status": resp["DBInstance"]["DBInstanceStatus"]})
+            except Exception as e:
+                started["skipped"].append({"type": "rds", "id": r["db_identifier"], "reason": str(e)})
+        else:
+            started["skipped"].append({"type": "rds", "id": r["db_identifier"], "reason": f"status={r['status']}"})
+
+    # ECS 起動（desired_count 0 → 1）
+    for r in resources["ecs"]:
+        if r["desired_count"] == 0:
+            try:
+                ecs.update_service(cluster=r["cluster_arn"], service=r["service_name"], desiredCount=1)
+                started["ecs"].append({"service_name": r["service_name"], "cluster": r["cluster"], "desired_count": 1})
+            except Exception as e:
+                started["skipped"].append({"type": "ecs", "id": r["service_name"], "reason": str(e)})
+        else:
+            started["skipped"].append({"type": "ecs", "id": r["service_name"], "reason": f"desired_count={r['desired_count']}"})
+
+    total = len(started["rds"]) + len(started["ecs"])
+    return {
+        "status": "ok",
+        "started": started,
+        "total_started": total,
+        "region": region,
+        "message": f"Terrace Villa Foresta Asama リソース {total} 件を起動しました。",
+    }
+
+
+@mcp.tool()
+def stop_hotel(region: str = DEFAULT_REGION) -> dict:
+    """
+    「Stop Hotel」と入力すると呼び出されます。
+    Name タグが 'Terrace Villa Foresta Asama' の RDS・ECS リソースをすべて停止します。
+    - RDS: available 状態の DB を停止
+    - ECS: desired_count を 0 に変更
+
+    Args:
+        region: AWSリージョン（デフォルト: ap-northeast-1）
+
+    Returns:
+        停止したリソースの一覧を含む dict
+    """
+    import boto3
+    rds = boto3.client("rds", region_name=region)
+    ecs = boto3.client("ecs", region_name=region)
+
+    resources = _find_hotel_resources(region)
+    stopped = {"rds": [], "ecs": [], "skipped": []}
+
+    # RDS 停止
+    for r in resources["rds"]:
+        if r["status"] == "available":
+            try:
+                resp = rds.stop_db_instance(DBInstanceIdentifier=r["db_identifier"])
+                stopped["rds"].append({"db_identifier": r["db_identifier"], "status": resp["DBInstance"]["DBInstanceStatus"]})
+            except Exception as e:
+                stopped["skipped"].append({"type": "rds", "id": r["db_identifier"], "reason": str(e)})
+        else:
+            stopped["skipped"].append({"type": "rds", "id": r["db_identifier"], "reason": f"status={r['status']}"})
+
+    # ECS 停止（desired_count → 0）
+    for r in resources["ecs"]:
+        if r["desired_count"] > 0:
+            try:
+                ecs.update_service(cluster=r["cluster_arn"], service=r["service_name"], desiredCount=0)
+                stopped["ecs"].append({"service_name": r["service_name"], "cluster": r["cluster"], "desired_count": 0})
+            except Exception as e:
+                stopped["skipped"].append({"type": "ecs", "id": r["service_name"], "reason": str(e)})
+        else:
+            stopped["skipped"].append({"type": "ecs", "id": r["service_name"], "reason": "already stopped (desired_count=0)"})
+
+    total = len(stopped["rds"]) + len(stopped["ecs"])
+    return {
+        "status": "ok",
+        "stopped": stopped,
+        "total_stopped": total,
+        "region": region,
+        "message": f"Terrace Villa Foresta Asama リソース {total} 件を停止しました。",
+    }
+
+
+# ─────────────────────────────────────────
 # エントリポイント
 # ─────────────────────────────────────────
 if __name__ == "__main__":
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
     if transport == "sse":
-        host = os.environ.get("MCP_HOST", "127.0.0.1")
-        port = int(os.environ.get("MCP_PORT", "8080"))
-        mcp.run(transport="sse", host=host, port=port)
+        # host/port は環境変数 FASTMCP_HOST / FASTMCP_PORT で指定
+        os.environ.setdefault("FASTMCP_HOST", os.environ.get("MCP_HOST", "127.0.0.1"))
+        os.environ.setdefault("FASTMCP_PORT", os.environ.get("MCP_PORT", "8000"))
+        mcp.run(transport="streamable-http")
     else:
         mcp.run(transport="stdio")
