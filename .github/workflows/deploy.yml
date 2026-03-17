@@ -35,6 +35,28 @@ jobs:
             aws_infra_mcp_server.py \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/opt/mcp/aws_infra_mcp_server.py"
 
+      - name: Update AWS config on EC2 (cross-account profile)
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" bash << 'EOF'
+          mkdir -p ~/.aws
+          # foresta-asama プロファイルが未設定の場合のみ追加
+          if ! grep -q '\[profile foresta-asama\]' ~/.aws/config 2>/dev/null; then
+            cat >> ~/.aws/config << 'AWSCFG'
+          [profile foresta-asama]
+          role_arn = arn:aws:iam::237657481351:role/OrganizationAccountAccessRole
+          credential_source = Ec2InstanceMetadata
+          region = ap-northeast-1
+          AWSCFG
+            echo "foresta-asama profile added."
+          else
+            echo "foresta-asama profile already exists."
+          fi
+          echo "=== ~/.aws/config ==="
+          cat ~/.aws/config
+          echo "=== AssumeRole verify ==="
+          aws sts get-caller-identity --profile foresta-asama
+          EOF
+
       - name: Restart MCP service
         run: |
           ssh -i ~/.ssh/deploy_key \

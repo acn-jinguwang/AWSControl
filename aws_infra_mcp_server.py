@@ -181,14 +181,57 @@ else:
 
 DEFAULT_REGION = "ap-northeast-1"
 
+# ─────────────────────────────────────────
+# クロスアカウント対応
+# ─────────────────────────────────────────
+
+_ACCOUNTS = {
+    "default":       None,  # EC2インスタンスロール（現アカウント 508985564091）
+    "foresta-asama": "arn:aws:iam::237657481351:role/OrganizationAccountAccessRole",
+}
+
+
+def get_aws_session(account: str = "default"):
+    """
+    account: 'default'       = EC2インスタンスロール（現アカウント 508985564091）
+             'foresta-asama' = クロスアカウント（237657481351）
+    """
+    import boto3
+    role_arn = _ACCOUNTS.get(account)
+    if role_arn:
+        sts = boto3.client("sts")
+        assumed = sts.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName=f"mcp-{account}",
+        )
+        creds = assumed["Credentials"]
+        return boto3.Session(
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+            region_name=DEFAULT_REGION,
+        )
+    return boto3.Session(region_name=DEFAULT_REGION)
+
 
 # ─────────────────────────────────────────
 # 共通ヘルパー
 # ─────────────────────────────────────────
 
-def _cf_client(region: str):
-    import boto3
-    return boto3.client("cloudformation", region_name=region)
+def _cf_client(region: str, account: str = "default"):
+    return get_aws_session(account).client("cloudformation", region_name=region)
+
+
+def _ec2_client(region: str, account: str = "default"):
+    return get_aws_session(account).client("ec2", region_name=region)
+
+
+def _rds_client(region: str, account: str = "default"):
+    return get_aws_session(account).client("rds", region_name=region)
+
+
+def _ecs_client(region: str, account: str = "default"):
+    return get_aws_session(account).client("ecs", region_name=region)
 
 
 def _params_to_boto(params: dict) -> list:
@@ -550,6 +593,7 @@ def estimate_stack_cost(
     stack_name: str,
     parameters: dict = None,
     region: str = DEFAULT_REGION,
+    account: str = "default",
 ) -> dict:
     """
     CloudFormation スタックのデプロイコストをAWS Cost Calculator で見積もります。
@@ -559,12 +603,13 @@ def estimate_stack_cost(
         stack_name:    スタック名（見積もりの識別に使用）
         parameters:    {"KeyName": "Value"} 形式のパラメータ
         region:        対象リージョン
+        account:       'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         estimate_url（AWS Calculator URL）を含む dict
     """
     try:
-        cf = _cf_client(region)
+        cf = _cf_client(region, account)
         boto_params = _params_to_boto(parameters)
         kwargs = {"TemplateBody": template_body}
         if boto_params:
@@ -596,6 +641,7 @@ def deploy_stack(
     tags: dict = None,
     capabilities: list = None,
     on_failure: str = "ROLLBACK",
+    account: str = "default",
 ) -> dict:
     """
     CloudFormation スタックを新規作成または更新します。
@@ -611,12 +657,13 @@ def deploy_stack(
         tags:         {"Environment": "prod"} 形式のタグ
         capabilities: ["CAPABILITY_IAM"] 等。省略時はテンプレートから自動検出
         on_failure:   新規作成失敗時の動作 "ROLLBACK" | "DO_NOTHING" | "DELETE"
+        account:      'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         action("CREATE"|"UPDATE"), stack_id, status, message を含む dict
     """
     try:
-        cf = _cf_client(region)
+        cf = _cf_client(region, account)
         boto_params = _params_to_boto(parameters)
         boto_tags = _tags_to_boto(tags)
         caps = capabilities if capabilities is not None else _detect_capabilities(template_body)
@@ -687,6 +734,7 @@ def create_change_set(
     parameters: dict = None,
     region: str = DEFAULT_REGION,
     change_set_name: str = None,
+    account: str = "default",
 ) -> dict:
     """
     既存スタックへの変更をプレビューするチェンジセットを作成します。
@@ -698,12 +746,13 @@ def create_change_set(
         parameters:      {"KeyName": "Value"} 形式のパラメータ
         region:          リージョン
         change_set_name: チェンジセット名（省略時は自動生成）
+        account:         'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         change_set_id, changes（追加/変更/削除リソース一覧）を含む dict
     """
     try:
-        cf = _cf_client(region)
+        cf = _cf_client(region, account)
         cs_name = change_set_name or f"changeset-{uuid.uuid4().hex[:8]}"
         boto_params = _params_to_boto(parameters)
         caps = _detect_capabilities(template_body)
@@ -780,6 +829,7 @@ def create_change_set(
 def get_stack_status(
     stack_name: str,
     region: str = DEFAULT_REGION,
+    account: str = "default",
 ) -> dict:
     """
     指定スタックの現在の状態・リソース一覧・Outputs を取得します。
@@ -787,12 +837,13 @@ def get_stack_status(
     Args:
         stack_name: スタック名またはスタックID
         region:     リージョン
+        account:    'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         stack_name, status, outputs, resources を含む dict
     """
     try:
-        cf = _cf_client(region)
+        cf = _cf_client(region, account)
 
         # スタック情報
         stack_resp = cf.describe_stacks(StackName=stack_name)
@@ -841,6 +892,7 @@ def get_stack_events(
     stack_name: str,
     region: str = DEFAULT_REGION,
     max_events: int = 20,
+    account: str = "default",
 ) -> dict:
     """
     スタックのイベントログ（デプロイ進捗・エラー詳細）を取得します。
@@ -850,12 +902,13 @@ def get_stack_events(
         stack_name: スタック名
         region:     リージョン
         max_events: 取得するイベント数（デフォルト20件）
+        account:    'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         events（timestamp, resource_type, logical_id, status, reason）を含む dict
     """
     try:
-        cf = _cf_client(region)
+        cf = _cf_client(region, account)
         response = cf.describe_stack_events(StackName=stack_name)
 
         events = []
@@ -906,6 +959,7 @@ def get_stack_events(
 def list_stacks(
     region: str = DEFAULT_REGION,
     status_filter: list = None,
+    account: str = "default",
 ) -> dict:
     """
     指定リージョンのCloudFormationスタック一覧を返します。
@@ -915,12 +969,13 @@ def list_stacks(
         status_filter: 絞り込むステータスのリスト
                        例: ["CREATE_COMPLETE", "UPDATE_COMPLETE"]
                        省略時はアクティブなスタックのみ（DELETE_COMPLETE を除く）
+        account:       'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         stacks リスト（stack_name, status, description, created_at）を含む dict
     """
     try:
-        cf = _cf_client(region)
+        cf = _cf_client(region, account)
 
         active_statuses = [
             "CREATE_IN_PROGRESS", "CREATE_FAILED", "CREATE_COMPLETE",
@@ -965,6 +1020,7 @@ def delete_stack(
     stack_name: str,
     region: str = DEFAULT_REGION,
     retain_resources: list = None,
+    account: str = "default",
 ) -> dict:
     """
     CloudFormation スタックとその管理リソースを削除します。
@@ -975,12 +1031,13 @@ def delete_stack(
         region:            リージョン
         retain_resources:  削除せずに保持するリソースの Logical ID リスト
                            例: ["S3BucketLogs"]（データが残っている S3 バケット等）
+        account:           'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         status, message を含む dict
     """
     try:
-        cf = _cf_client(region)
+        cf = _cf_client(region, account)
         kwargs = {"StackName": stack_name}
         if retain_resources:
             kwargs["RetainResources"] = retain_resources
@@ -1009,6 +1066,7 @@ def wait_for_stack(
     wait_type: str = "auto",
     region: str = DEFAULT_REGION,
     timeout_seconds: int = 600,
+    account: str = "default",
 ) -> dict:
     """
     CloudFormation スタックの操作完了まで待機します。
@@ -1020,6 +1078,7 @@ def wait_for_stack(
                           "auto" の場合は現在の StackStatus から自動判定します
         region:           リージョン
         timeout_seconds:  最大待機秒数（デフォルト: 600秒）
+        account:          'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         final_status, outputs, resources, elapsed_seconds を含む dict
@@ -1028,7 +1087,7 @@ def wait_for_stack(
     start_time = time.time()
 
     try:
-        cf = _cf_client(region)
+        cf = _cf_client(region, account)
 
         # wait_type の自動判定
         if wait_type == "auto":
@@ -2146,20 +2205,20 @@ Terraform を使う場合:
 # ─────────────────────────────────────────
 
 @mcp.tool()
-def list_ec2_instances(region: str = DEFAULT_REGION, filters: dict = None) -> dict:
+def list_ec2_instances(region: str = DEFAULT_REGION, filters: dict = None, account: str = "default") -> dict:
     """
     EC2インスタンスの一覧と状態を返します。
 
     Args:
         region:  AWSリージョン（デフォルト: ap-northeast-1）
         filters: フィルタ条件 {"Name": "...", "Values": [...]} のリスト形式も可
+        account: 'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         instances リストを含む dict
     """
     try:
-        import boto3
-        ec2 = boto3.client("ec2", region_name=region)
+        ec2 = _ec2_client(region, account)
         kwargs = {}
         if filters:
             if isinstance(filters, dict):
@@ -2186,20 +2245,20 @@ def list_ec2_instances(region: str = DEFAULT_REGION, filters: dict = None) -> di
 
 
 @mcp.tool()
-def start_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION) -> dict:
+def start_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, account: str = "default") -> dict:
     """
     EC2インスタンスを起動します。
 
     Args:
         instance_ids: 起動するインスタンスIDのリスト（例: ["i-0123456789abcdef0"]）
         region:       AWSリージョン
+        account:      'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         starting_instances リストを含む dict
     """
     try:
-        import boto3
-        ec2 = boto3.client("ec2", region_name=region)
+        ec2 = _ec2_client(region, account)
         response = ec2.start_instances(InstanceIds=instance_ids)
         result = [
             {"instance_id": i["InstanceId"], "previous_state": i["PreviousState"]["Name"], "current_state": i["CurrentState"]["Name"]}
@@ -2211,7 +2270,7 @@ def start_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION) -> dic
 
 
 @mcp.tool()
-def stop_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, force: bool = False) -> dict:
+def stop_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, force: bool = False, account: str = "default") -> dict:
     """
     EC2インスタンスを停止します。
 
@@ -2219,13 +2278,13 @@ def stop_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, force: 
         instance_ids: 停止するインスタンスIDのリスト
         region:       AWSリージョン
         force:        強制停止する場合は True（デフォルト: False）
+        account:      'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         stopping_instances リストを含む dict
     """
     try:
-        import boto3
-        ec2 = boto3.client("ec2", region_name=region)
+        ec2 = _ec2_client(region, account)
         response = ec2.stop_instances(InstanceIds=instance_ids, Force=force)
         result = [
             {"instance_id": i["InstanceId"], "previous_state": i["PreviousState"]["Name"], "current_state": i["CurrentState"]["Name"]}
@@ -2237,20 +2296,20 @@ def stop_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, force: 
 
 
 @mcp.tool()
-def reboot_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION) -> dict:
+def reboot_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, account: str = "default") -> dict:
     """
     EC2インスタンスを再起動します。
 
     Args:
         instance_ids: 再起動するインスタンスIDのリスト
         region:       AWSリージョン
+        account:      'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         status と対象インスタンスIDを含む dict
     """
     try:
-        import boto3
-        ec2 = boto3.client("ec2", region_name=region)
+        ec2 = _ec2_client(region, account)
         ec2.reboot_instances(InstanceIds=instance_ids)
         return {"status": "ok", "rebooted_instance_ids": instance_ids, "region": region, "message": "再起動リクエストを送信しました。"}
     except Exception as e:
@@ -2262,19 +2321,19 @@ def reboot_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION) -> di
 # ─────────────────────────────────────────
 
 @mcp.tool()
-def list_rds_instances(region: str = DEFAULT_REGION) -> dict:
+def list_rds_instances(region: str = DEFAULT_REGION, account: str = "default") -> dict:
     """
     RDS DBインスタンスの一覧と状態を返します。
 
     Args:
-        region: AWSリージョン
+        region:  AWSリージョン
+        account: 'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         instances リストを含む dict
     """
     try:
-        import boto3
-        rds = boto3.client("rds", region_name=region)
+        rds = _rds_client(region, account)
         response = rds.describe_db_instances()
         instances = [
             {
@@ -2295,20 +2354,20 @@ def list_rds_instances(region: str = DEFAULT_REGION) -> dict:
 
 
 @mcp.tool()
-def start_rds_instance(db_identifier: str, region: str = DEFAULT_REGION) -> dict:
+def start_rds_instance(db_identifier: str, region: str = DEFAULT_REGION, account: str = "default") -> dict:
     """
     RDS DBインスタンスを起動します。
 
     Args:
         db_identifier: DBインスタンス識別子
         region:        AWSリージョン
+        account:       'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         status と DBインスタンス情報を含む dict
     """
     try:
-        import boto3
-        rds = boto3.client("rds", region_name=region)
+        rds = _rds_client(region, account)
         response = rds.start_db_instance(DBInstanceIdentifier=db_identifier)
         db = response["DBInstance"]
         return {"status": "ok", "db_identifier": db["DBInstanceIdentifier"], "db_status": db["DBInstanceStatus"], "region": region}
@@ -2317,7 +2376,7 @@ def start_rds_instance(db_identifier: str, region: str = DEFAULT_REGION) -> dict
 
 
 @mcp.tool()
-def stop_rds_instance(db_identifier: str, region: str = DEFAULT_REGION) -> dict:
+def stop_rds_instance(db_identifier: str, region: str = DEFAULT_REGION, account: str = "default") -> dict:
     """
     RDS DBインスタンスを停止します。
     注意: RDSは停止後7日で自動的に再起動されます。
@@ -2325,13 +2384,13 @@ def stop_rds_instance(db_identifier: str, region: str = DEFAULT_REGION) -> dict:
     Args:
         db_identifier: DBインスタンス識別子
         region:        AWSリージョン
+        account:       'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         status と DBインスタンス情報を含む dict
     """
     try:
-        import boto3
-        rds = boto3.client("rds", region_name=region)
+        rds = _rds_client(region, account)
         response = rds.stop_db_instance(DBInstanceIdentifier=db_identifier)
         db = response["DBInstance"]
         return {
@@ -2350,20 +2409,20 @@ def stop_rds_instance(db_identifier: str, region: str = DEFAULT_REGION) -> dict:
 # ─────────────────────────────────────────
 
 @mcp.tool()
-def list_ecs_services(region: str = DEFAULT_REGION, cluster: str = None) -> dict:
+def list_ecs_services(region: str = DEFAULT_REGION, cluster: str = None, account: str = "default") -> dict:
     """
     ECSクラスターとサービスの一覧を返します。
 
     Args:
         region:  AWSリージョン
         cluster: クラスター名またはARN（省略時は全クラスター）
+        account: 'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         clusters と services を含む dict
     """
     try:
-        import boto3
-        ecs = boto3.client("ecs", region_name=region)
+        ecs = _ecs_client(region, account)
         cluster_arns = [cluster] if cluster else ecs.list_clusters()["clusterArns"]
         result = []
         for cluster_arn in cluster_arns:
@@ -2391,7 +2450,7 @@ def list_ecs_services(region: str = DEFAULT_REGION, cluster: str = None) -> dict
 
 
 @mcp.tool()
-def scale_ecs_service(cluster: str, service: str, desired_count: int, region: str = DEFAULT_REGION) -> dict:
+def scale_ecs_service(cluster: str, service: str, desired_count: int, region: str = DEFAULT_REGION, account: str = "default") -> dict:
     """
     ECSサービスのタスク数を変更します。0にすると停止、1以上で起動します。
 
@@ -2400,13 +2459,13 @@ def scale_ecs_service(cluster: str, service: str, desired_count: int, region: st
         service:       サービス名またはARN
         desired_count: 希望タスク数（0で停止）
         region:        AWSリージョン
+        account:       'default'（現アカウント）または 'foresta-asama'
 
     Returns:
         status とサービス情報を含む dict
     """
     try:
-        import boto3
-        ecs = boto3.client("ecs", region_name=region)
+        ecs = _ecs_client(region, account)
         response = ecs.update_service(cluster=cluster, service=service, desiredCount=desired_count)
         svc = response["service"]
         return {
