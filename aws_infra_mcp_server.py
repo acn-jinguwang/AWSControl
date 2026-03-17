@@ -66,6 +66,17 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
+from pydantic import Field
+
+# account パラメータの共通定義
+_ACCOUNT_PARAM = Annotated[
+    str,
+    Field(
+        default="default",
+        description="AWS account to operate. 'default' = 508985564091, 'foresta-asama' = 237657481351",
+    ),
+]
 
 import botocore.exceptions  # 軽量(0.25s)、except句で参照されるためモジュールレベルで必要
 from mcp.server.fastmcp import FastMCP
@@ -593,7 +604,7 @@ def estimate_stack_cost(
     stack_name: str,
     parameters: dict = None,
     region: str = DEFAULT_REGION,
-    account: str = "default",
+    account: _ACCOUNT_PARAM = "default",
 ) -> dict:
     """
     CloudFormation スタックのデプロイコストをAWS Cost Calculator で見積もります。
@@ -641,7 +652,7 @@ def deploy_stack(
     tags: dict = None,
     capabilities: list = None,
     on_failure: str = "ROLLBACK",
-    account: str = "default",
+    account: _ACCOUNT_PARAM = "default",
 ) -> dict:
     """
     CloudFormation スタックを新規作成または更新します。
@@ -734,7 +745,7 @@ def create_change_set(
     parameters: dict = None,
     region: str = DEFAULT_REGION,
     change_set_name: str = None,
-    account: str = "default",
+    account: _ACCOUNT_PARAM = "default",
 ) -> dict:
     """
     既存スタックへの変更をプレビューするチェンジセットを作成します。
@@ -829,7 +840,7 @@ def create_change_set(
 def get_stack_status(
     stack_name: str,
     region: str = DEFAULT_REGION,
-    account: str = "default",
+    account: _ACCOUNT_PARAM = "default",
 ) -> dict:
     """
     指定スタックの現在の状態・リソース一覧・Outputs を取得します。
@@ -892,7 +903,7 @@ def get_stack_events(
     stack_name: str,
     region: str = DEFAULT_REGION,
     max_events: int = 20,
-    account: str = "default",
+    account: _ACCOUNT_PARAM = "default",
 ) -> dict:
     """
     スタックのイベントログ（デプロイ進捗・エラー詳細）を取得します。
@@ -959,7 +970,7 @@ def get_stack_events(
 def list_stacks(
     region: str = DEFAULT_REGION,
     status_filter: list = None,
-    account: str = "default",
+    account: _ACCOUNT_PARAM = "default",
 ) -> dict:
     """
     指定リージョンのCloudFormationスタック一覧を返します。
@@ -1020,7 +1031,7 @@ def delete_stack(
     stack_name: str,
     region: str = DEFAULT_REGION,
     retain_resources: list = None,
-    account: str = "default",
+    account: _ACCOUNT_PARAM = "default",
 ) -> dict:
     """
     CloudFormation スタックとその管理リソースを削除します。
@@ -1066,7 +1077,7 @@ def wait_for_stack(
     wait_type: str = "auto",
     region: str = DEFAULT_REGION,
     timeout_seconds: int = 600,
-    account: str = "default",
+    account: _ACCOUNT_PARAM = "default",
 ) -> dict:
     """
     CloudFormation スタックの操作完了まで待機します。
@@ -2205,7 +2216,7 @@ Terraform を使う場合:
 # ─────────────────────────────────────────
 
 @mcp.tool()
-def list_ec2_instances(region: str = DEFAULT_REGION, filters: dict = None, account: str = "default") -> dict:
+def list_ec2_instances(region: str = DEFAULT_REGION, filters: dict = None, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     EC2インスタンスの一覧と状態を返します。
 
@@ -2245,7 +2256,7 @@ def list_ec2_instances(region: str = DEFAULT_REGION, filters: dict = None, accou
 
 
 @mcp.tool()
-def start_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, account: str = "default") -> dict:
+def start_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     EC2インスタンスを起動します。
 
@@ -2270,7 +2281,7 @@ def start_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, accoun
 
 
 @mcp.tool()
-def stop_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, force: bool = False, account: str = "default") -> dict:
+def stop_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, force: bool = False, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     EC2インスタンスを停止します。
 
@@ -2296,7 +2307,7 @@ def stop_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, force: 
 
 
 @mcp.tool()
-def reboot_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, account: str = "default") -> dict:
+def reboot_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     EC2インスタンスを再起動します。
 
@@ -2321,7 +2332,7 @@ def reboot_ec2_instances(instance_ids: list, region: str = DEFAULT_REGION, accou
 # ─────────────────────────────────────────
 
 @mcp.tool()
-def list_rds_instances(region: str = DEFAULT_REGION, account: str = "default") -> dict:
+def list_rds_instances(region: str = DEFAULT_REGION, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     RDS DBインスタンスの一覧と状態を返します。
 
@@ -2354,7 +2365,7 @@ def list_rds_instances(region: str = DEFAULT_REGION, account: str = "default") -
 
 
 @mcp.tool()
-def start_rds_instance(db_identifier: str, region: str = DEFAULT_REGION, account: str = "default") -> dict:
+def start_rds_instance(db_identifier: str, region: str = DEFAULT_REGION, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     RDS DBインスタンスを起動します。
 
@@ -2376,7 +2387,7 @@ def start_rds_instance(db_identifier: str, region: str = DEFAULT_REGION, account
 
 
 @mcp.tool()
-def stop_rds_instance(db_identifier: str, region: str = DEFAULT_REGION, account: str = "default") -> dict:
+def stop_rds_instance(db_identifier: str, region: str = DEFAULT_REGION, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     RDS DBインスタンスを停止します。
     注意: RDSは停止後7日で自動的に再起動されます。
@@ -2409,7 +2420,7 @@ def stop_rds_instance(db_identifier: str, region: str = DEFAULT_REGION, account:
 # ─────────────────────────────────────────
 
 @mcp.tool()
-def list_ecs_services(region: str = DEFAULT_REGION, cluster: str = None, account: str = "default") -> dict:
+def list_ecs_services(region: str = DEFAULT_REGION, cluster: str = None, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     ECSクラスターとサービスの一覧を返します。
 
@@ -2450,7 +2461,7 @@ def list_ecs_services(region: str = DEFAULT_REGION, cluster: str = None, account
 
 
 @mcp.tool()
-def scale_ecs_service(cluster: str, service: str, desired_count: int, region: str = DEFAULT_REGION, account: str = "default") -> dict:
+def scale_ecs_service(cluster: str, service: str, desired_count: int, region: str = DEFAULT_REGION, account: _ACCOUNT_PARAM = "default") -> dict:
     """
     ECSサービスのタスク数を変更します。0にすると停止、1以上で起動します。
 
