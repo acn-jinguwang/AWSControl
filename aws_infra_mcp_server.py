@@ -1,5 +1,5 @@
 """
-AWS Infrastructure MCP Server
+AWS Infrastructure MCP Server (v2 - クロスアカウント対応)
 
 Claudeが生成したAWSアーキテクチャを自動的にAWSで構築するMCPサーバー。
 CloudFormation / AWS CDK / Terraform のいずれかでインフラをデプロイできます。
